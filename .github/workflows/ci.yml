@@ -27,8 +27,14 @@ jobs:
           cache: maven
           cache-dependency-path: backend/pom.xml
 
-      - name: Build and run tests
-        run: ./mvnw --batch-mode --no-transfer-progress clean verify
+      - name: Build
+        run: ./mvnw --batch-mode --no-transfer-progress clean package -DskipUnitTests=true
+
+      - name: Unit tests
+        run: ./mvnw --batch-mode --no-transfer-progress test
+
+      - name: Integration tests
+        run: ./mvnw --batch-mode --no-transfer-progress verify -DskipUnitTests=true
 
       - name: Upload test reports
         if: always()

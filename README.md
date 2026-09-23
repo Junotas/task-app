@@ -4,7 +4,7 @@ En enkel Task/Todo-applikation med ett REST API i Java/Spring Boot och en
 frontend i HTML, CSS och JavaScript. Projektet demonstrerar ett komplett
 CI/CD-flöde med GitHub Actions.
 
-Under utveckling — README fylls på löpande.
+Under utveckling README fylls på löpande.
 
 ## Teknisk stack
 
