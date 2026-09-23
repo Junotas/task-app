@@ -124,6 +124,37 @@ button:focus-visible {
     overflow-wrap: break-word;
 }
 
+.task--done .task__title {
+    color: var(--muted);
+    text-decoration: line-through;
+}
+
+.task input[type="checkbox"] {
+    width: 1.05rem;
+    height: 1.05rem;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex: none;
+}
+
+.task__remove {
+    flex: none;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.task__remove:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
 .task__description {
     display: block;
     color: var(--muted);

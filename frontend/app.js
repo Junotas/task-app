@@ -12,6 +12,47 @@ function showMessage(text, isError = false) {
     message.classList.toggle("message--error", isError);
 }
 
+function buildTaskItem(task) {
+    const item = document.createElement("li");
+    item.className = task.completed ? "task task--done" : "task";
+    item.dataset.testid = "task-item";
+    item.dataset.taskId = task.id;
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = task.completed;
+    checkbox.dataset.testid = "task-checkbox";
+    checkbox.setAttribute("aria-label", `Markera "${task.title}" som klar`);
+    checkbox.addEventListener("change", () => toggleTask(task, checkbox.checked));
+
+    const body = document.createElement("div");
+    body.className = "task__body";
+
+    const title = document.createElement("span");
+    title.className = "task__title";
+    title.dataset.testid = "task-title";
+    title.textContent = task.title;
+    body.appendChild(title);
+
+    if (task.description) {
+        const description = document.createElement("span");
+        description.className = "task__description";
+        description.textContent = task.description;
+        body.appendChild(description);
+    }
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "task__remove";
+    remove.dataset.testid = "delete-button";
+    remove.textContent = "Ta bort";
+    remove.setAttribute("aria-label", `Ta bort "${task.title}"`);
+    remove.addEventListener("click", () => deleteTask(task.id));
+
+    item.append(checkbox, body, remove);
+    return item;
+}
+
 function renderTasks(tasks) {
     list.replaceChildren();
 
@@ -24,32 +65,13 @@ function renderTasks(tasks) {
     }
 
     for (const task of tasks) {
-        const item = document.createElement("li");
-        item.className = "task";
-        item.dataset.testid = "task-item";
-        item.dataset.taskId = task.id;
-
-        const body = document.createElement("div");
-        body.className = "task__body";
-
-        const title = document.createElement("span");
-        title.className = "task__title";
-        title.dataset.testid = "task-title";
-        title.textContent = task.title;
-        body.appendChild(title);
-
-        if (task.description) {
-            const description = document.createElement("span");
-            description.className = "task__description";
-            description.textContent = task.description;
-            body.appendChild(description);
-        }
-
-        item.appendChild(body);
-        list.appendChild(item);
+        list.appendChild(buildTaskItem(task));
     }
 
-    count.textContent = tasks.length === 1 ? "1 uppgift" : `${tasks.length} uppgifter`;
+    const done = tasks.filter((task) => task.completed).length;
+    count.textContent = tasks.length === 0
+        ? "0 uppgifter"
+        : `${done} av ${tasks.length} klara`;
 }
 
 async function loadTasks() {
@@ -97,6 +119,43 @@ async function createTask(event) {
         await loadTasks();
     } catch (error) {
         showMessage(`Kunde inte spara uppgiften: ${error.message}`, true);
+    }
+}
+
+async function toggleTask(task, completed) {
+    try {
+        const response = await fetch(`${API_URL}/${task.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title: task.title,
+                description: task.description,
+                completed,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Servern svarade ${response.status}`);
+        }
+
+        await loadTasks();
+    } catch (error) {
+        showMessage(`Kunde inte uppdatera uppgiften: ${error.message}`, true);
+        await loadTasks();
+    }
+}
+
+async function deleteTask(id) {
+    try {
+        const response = await fetch(`${API_URL}/${id}`, { method: "DELETE" });
+
+        if (!response.ok) {
+            throw new Error(`Servern svarade ${response.status}`);
+        }
+
+        await loadTasks();
+    } catch (error) {
+        showMessage(`Kunde inte ta bort uppgiften: ${error.message}`, true);
     }
 }
 
