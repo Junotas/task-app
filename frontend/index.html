@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Task App</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="page">
+        <header class="page__header">
+            <h1>Att göra</h1>
+            <p class="count" id="count" data-testid="task-count"></p>
+        </header>
+
+        <form class="new-task" id="task-form" data-testid="task-form">
+            <label class="visually-hidden" for="title">Vad ska göras?</label>
+            <input
+                type="text"
+                id="title"
+                name="title"
+                placeholder="Vad ska göras?"
+                autocomplete="off"
+                required
+                data-testid="title-input">
+
+            <label class="visually-hidden" for="description">Detaljer</label>
+            <input
+                type="text"
+                id="description"
+                name="description"
+                placeholder="Detaljer (valfritt)"
+                autocomplete="off"
+                data-testid="description-input">
+
+            <button type="submit" data-testid="add-button">Lägg till</button>
+        </form>
+
+        <p class="message" id="message" role="status" data-testid="message"></p>
+
+        <ul class="tasks" id="task-list" data-testid="task-list"></ul>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
