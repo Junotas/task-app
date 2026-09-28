@@ -1,0 +1,6 @@
+.git
+.github
+e2e
+**/target
+**/node_modules
+README.md
