@@ -10,9 +10,6 @@ public record TaskResponse(Long id, String title, String description, boolean co
     Objects.requireNonNull(task, "task must not be null");
 
     return new TaskResponse(
-            task.getId(),
-            task.getTitle(),
-            task.getDescription(),
-            task.isCompleted());
+        task.getId(), task.getTitle(), task.getDescription(), task.isCompleted());
   }
 }
