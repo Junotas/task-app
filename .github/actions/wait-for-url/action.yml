@@ -1,0 +1,75 @@
+name: Deploy image to Render
+description: Deploys a container image to a Render service and waits until the deploy is live
+
+inputs:
+  api-key:
+    description: Render API key
+    required: true
+  service-id:
+    description: Id of the Render service to deploy to
+    required: true
+  image:
+    description: Full image reference to deploy
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Trigger Render deploy
+      id: trigger
+      shell: bash
+      env:
+        RENDER_API_KEY: ${{ inputs.api-key }}
+        SERVICE_ID: ${{ inputs.service-id }}
+        IMAGE: ${{ inputs.image }}
+      run: |
+        response=$(curl --fail --silent --show-error \
+          --request POST \
+          --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys" \
+          --header "Authorization: Bearer ${RENDER_API_KEY}" \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          --data "{\"imageUrl\":\"${IMAGE}\"}")
+
+        deploy_id=$(echo "$response" | jq -r '.id')
+
+        if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
+          echo "Render did not return a deploy id"
+          echo "$response"
+          exit 1
+        fi
+
+        echo "Triggered deploy $deploy_id with image $IMAGE"
+        echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+
+    - name: Wait for deploy to go live
+      shell: bash
+      env:
+        RENDER_API_KEY: ${{ inputs.api-key }}
+        SERVICE_ID: ${{ inputs.service-id }}
+        DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+      run: |
+        for attempt in $(seq 1 90); do
+          status=$(curl --fail --silent --show-error \
+            --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "Accept: application/json" | jq -r '.status')
+
+          echo "Attempt ${attempt}: ${status}"
+
+          case "$status" in
+            live)
+              echo "Deploy is live"
+              exit 0
+              ;;
+            build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
+              echo "Deploy ended with status ${status}"
+              exit 1
+              ;;
+          esac
+
+          sleep 10
+        done
+
+        echo "Timed out waiting for the deploy to go live"
+        exit 1
