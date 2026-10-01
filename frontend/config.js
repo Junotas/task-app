@@ -1,1 +1,1 @@
-window.APP_CONFIG = { apiUrl: "" };
+window.APP_CONFIG = { apiUrl: "http://localhost:8080" };
