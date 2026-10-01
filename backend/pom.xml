@@ -63,6 +63,11 @@
             <resource>
                 <directory>${project.basedir}/../frontend</directory>
                 <targetPath>static</targetPath>
+                <includes>
+                    <include>*.html</include>
+                    <include>*.css</include>
+                    <include>*.js</include>
+                </includes>
             </resource>
         </resources>
 

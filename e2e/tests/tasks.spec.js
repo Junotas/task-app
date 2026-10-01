@@ -17,7 +17,11 @@ test("a user can create, complete and delete a task", async ({ page }) => {
     await expect(task).toBeVisible();
     await expect(task.getByTestId("task-title")).toHaveText(title);
 
+    const updateSaved = page.waitForResponse(
+        (response) => response.request().method() === "PUT" && response.url().includes("/api/tasks/"),
+    );
     await task.getByTestId("task-checkbox").check();
+    expect((await updateSaved).status()).toBe(200);
     await expect(task.getByTestId("task-checkbox")).toBeChecked();
 
     await page.reload();
