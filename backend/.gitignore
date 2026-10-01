@@ -12,7 +12,9 @@ target/
 .settings
 .springBeans
 .sts4-cache
-
+test-results/
+playwright-report/
+blob-report/
 ### IntelliJ IDEA ###
 .idea
 *.iws
