@@ -5,9 +5,42 @@ on:
     branches: [ dev, main ]
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+
+    outputs:
+      backend: ${{ steps.filter.outputs.backend == 'true' || steps.filter.outputs.pipeline == 'true' }}
+      frontend: ${{ steps.filter.outputs.frontend == 'true' || steps.filter.outputs.pipeline == 'true' }}
+      e2e: ${{ steps.filter.outputs.backend == 'true' || steps.filter.outputs.frontend == 'true' || steps.filter.outputs.e2e == 'true' || steps.filter.outputs.pipeline == 'true' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+            e2e:
+              - 'e2e/**'
+            pipeline:
+              - '.github/**'
+
   build:
     name: Build and test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
 
     defaults:
       run:
@@ -44,10 +77,53 @@ jobs:
             backend/target/failsafe-reports/
           if-no-files-found: ignore
 
+  frontend:
+    name: Frontend image
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          load: true
+          tags: task-app-frontend:pr
+          cache-from: type=gha,scope=frontend
+
+      - name: Verify that the image serves the frontend with the given API URL
+        run: |
+          docker run --detach --name frontend --publish 8081:8080 \
+            --env API_URL=https://backend.example.test task-app-frontend:pr
+
+          for attempt in $(seq 1 15); do
+            if curl --fail --silent http://localhost:8081/ > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl --fail --silent --show-error http://localhost:8081/ | grep -q 'id="task-list"'
+          curl --fail --silent --show-error http://localhost:8081/config.js | grep -q 'https://backend.example.test'
+
+          echo "Frontend image serves the page and the configured API URL"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs frontend || true
+
   e2e:
     name: End-to-end tests
     runs-on: ubuntu-latest
-    needs: build
+    needs: [ changes, build ]
+    if: ${{ !cancelled() && !failure() && needs.changes.outputs.e2e == 'true' }}
 
     steps:
       - name: Checkout repository
@@ -61,7 +137,7 @@ jobs:
           cache: maven
           cache-dependency-path: backend/pom.xml
 
-      - name: Build application
+      - name: Build backend
         working-directory: backend
         run: ./mvnw --batch-mode --no-transfer-progress clean package -DskipUnitTests=true
 
@@ -80,7 +156,7 @@ jobs:
         working-directory: e2e
         run: npx playwright install --with-deps chromium
 
-      - name: Run end-to-end tests
+      - name: Run end-to-end tests against local backend and frontend
         working-directory: e2e
         run: npx playwright test
 

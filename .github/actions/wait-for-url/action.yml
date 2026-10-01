@@ -1,0 +1,36 @@
+name: Wait for URL
+description: Polls a URL until it answers 200, giving free-tier services time to wake up
+
+inputs:
+  url:
+    description: URL that should answer 200
+    required: true
+  attempts:
+    description: Number of attempts, ten seconds apart
+    required: false
+    default: '30'
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for ${{ inputs.url }}
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        ATTEMPTS: ${{ inputs.attempts }}
+      run: |
+        for attempt in $(seq 1 "$ATTEMPTS"); do
+          code=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --max-time 60 "$URL" || true)
+
+          echo "Attempt ${attempt}: HTTP ${code} from ${URL}"
+
+          if [ "$code" = "200" ]; then
+            exit 0
+          fi
+
+          sleep 10
+        done
+
+        echo "${URL} did not respond in time"
+        exit 1

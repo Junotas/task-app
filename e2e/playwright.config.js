@@ -1,7 +1,8 @@
-import { defineConfig, devices } from "@playwright/test";
+import {defineConfig, devices} from "@playwright/test";
 
-const baseURL = process.env.BASE_URL || "http://localhost:8080";
-const startLocalServer = !process.env.BASE_URL;
+const deployedUrl = process.env.BASE_URL;
+const backendPort = 8080;
+const frontendPort = 5173;
 
 export default defineConfig({
     testDir: "./tests",
@@ -10,9 +11,10 @@ export default defineConfig({
     forbidOnly: !!process.env.CI,
     retries: process.env.CI ? 2 : 0,
     reporter: process.env.CI ? [["html"], ["list"]] : [["list"]],
+    globalTeardown: "./scripts/stop-local-servers.js",
 
     use: {
-        baseURL,
+        baseURL: deployedUrl || `http://localhost:${frontendPort}`,
         trace: "on-first-retry",
         screenshot: "only-on-failure",
     },
@@ -20,16 +22,26 @@ export default defineConfig({
     projects: [
         {
             name: "chromium",
-            use: { ...devices["Desktop Chrome"] },
+            use: {...devices["Desktop Chrome"]},
         },
     ],
 
-    webServer: startLocalServer
-        ? {
-              command: "java -jar ../backend/target/task-app-0.0.1-SNAPSHOT.jar",
-              url: "http://localhost:8080/api/tasks",
-              reuseExistingServer: true,
-              timeout: 120_000,
-          }
-        : undefined,
+    webServer: deployedUrl
+        ? undefined
+        : [
+            {
+                command: "java -jar ../backend/target/task-app-0.0.1-SNAPSHOT.jar",
+                url: `http://localhost:${backendPort}/api/tasks`,
+                env: {...process.env, ALLOWED_ORIGINS: `http://localhost:${frontendPort}`},
+                reuseExistingServer: false,
+                timeout: 120_000,
+            },
+            {
+                command: "node ../frontend/dev-server.mjs",
+                url: `http://localhost:${frontendPort}`,
+                env: {...process.env, PORT: String(frontendPort)},
+                reuseExistingServer: false,
+                timeout: 30_000,
+            },
+        ],
 });

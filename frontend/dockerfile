@@ -1,0 +1,11 @@
+FROM nginx:1.27-alpine
+
+ENV PORT=8080
+
+COPY docker/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/40-write-config.sh /docker-entrypoint.d/40-write-config.sh
+RUN chmod +x /docker-entrypoint.d/40-write-config.sh
+
+COPY index.html style.css app.js config.js /usr/share/nginx/html/
+
+EXPOSE 8080

@@ -4,10 +4,47 @@ on:
   push:
     branches: [ dev, main ]
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      backend: ${{ steps.filter.outputs.backend == 'true' || steps.filter.outputs.pipeline == 'true' }}
+      frontend: ${{ steps.filter.outputs.frontend == 'true' || steps.filter.outputs.pipeline == 'true' }}
+      e2e: ${{ steps.filter.outputs.backend == 'true' || steps.filter.outputs.frontend == 'true' || steps.filter.outputs.e2e == 'true' || steps.filter.outputs.pipeline == 'true' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.ref_name }}
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+            e2e:
+              - 'e2e/**'
+            pipeline:
+              - '.github/**'
+
   build:
     name: Build and test
     runs-on: ubuntu-latest
+    needs: changes
+    if: github.ref == 'refs/heads/dev' && needs.changes.outputs.backend == 'true'
 
     defaults:
       run:
@@ -44,10 +81,11 @@ jobs:
             backend/target/failsafe-reports/
           if-no-files-found: ignore
 
-  image:
-    name: Build and push image
+  backend-image:
+    name: Build and push backend image
     runs-on: ubuntu-latest
-    needs: build
+    needs: [ changes, build ]
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/dev' && needs.changes.outputs.backend == 'true' }}
 
     permissions:
       contents: read
@@ -77,85 +115,122 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: backend
           push: true
           tags: ${{ steps.meta.outputs.image }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
 
-  deploy-development:
-    name: Deploy to development
+  frontend-image:
+    name: Build and push frontend image
     runs-on: ubuntu-latest
-    needs: image
-    if: github.ref == 'refs/heads/dev'
+    needs: changes
+    if: github.ref == 'refs/heads/dev' && needs.changes.outputs.frontend == 'true'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image name
+        id: meta
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Verify that the image serves the frontend with the given API URL
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          docker run --detach --name frontend --publish 8081:8080 \
+            --env API_URL=https://backend.example.test "$IMAGE"
+
+          for attempt in $(seq 1 15); do
+            if curl --fail --silent http://localhost:8081/ > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl --fail --silent --show-error http://localhost:8081/ | grep -q 'id="task-list"'
+          curl --fail --silent --show-error http://localhost:8081/config.js | grep -q 'https://backend.example.test'
+
+          echo "Frontend image serves the page and the configured API URL"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs frontend || true
+
+  deploy-backend-development:
+    name: Deploy backend to development
+    runs-on: ubuntu-latest
+    needs: [ changes, backend-image ]
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/dev' && needs.changes.outputs.backend == 'true' }}
 
     environment:
       name: development
-      url: ${{ vars.APP_URL }}
+      url: ${{ vars.BACKEND_URL }}
 
     steps:
-      - name: Trigger Render deploy
-        id: trigger
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-          IMAGE: ${{ needs.image.outputs.image }}
-        run: |
-          response=$(curl --fail --silent --show-error \
-            --request POST \
-            --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys" \
-            --header "Authorization: Bearer ${RENDER_API_KEY}" \
-            --header "Accept: application/json" \
-            --header "Content-Type: application/json" \
-            --data "{\"imageUrl\":\"${IMAGE}\"}")
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          deploy_id=$(echo "$response" | jq -r '.id')
+      - name: Deploy to Render
+        uses: ./.github/actions/render-deploy
+        with:
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          service-id: ${{ secrets.RENDER_BACKEND_SERVICE_ID }}
+          image: ${{ needs.backend-image.outputs.image }}
 
-          if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
-            echo "Render did not return a deploy id"
-            echo "$response"
-            exit 1
-          fi
+  deploy-frontend-development:
+    name: Deploy frontend to development
+    runs-on: ubuntu-latest
+    needs: [ changes, frontend-image, deploy-backend-development ]
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/dev' && needs.changes.outputs.frontend == 'true' }}
 
-          echo "Triggered deploy $deploy_id with image $IMAGE"
-          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+    environment:
+      name: development
+      url: ${{ vars.FRONTEND_URL }}
 
-      - name: Wait for deploy to go live
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
-        run: |
-          for attempt in $(seq 1 90); do
-            status=$(curl --fail --silent --show-error \
-              --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" \
-              --header "Authorization: Bearer ${RENDER_API_KEY}" \
-              --header "Accept: application/json" | jq -r '.status')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-            echo "Attempt ${attempt}: ${status}"
-
-            case "$status" in
-              live)
-                echo "Deploy is live"
-                exit 0
-                ;;
-              build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
-                echo "Deploy ended with status ${status}"
-                exit 1
-                ;;
-            esac
-
-            sleep 10
-          done
-
-          echo "Timed out waiting for the deploy to go live"
-          exit 1
+      - name: Deploy to Render
+        uses: ./.github/actions/render-deploy
+        with:
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          service-id: ${{ secrets.RENDER_FRONTEND_SERVICE_ID }}
+          image: ${{ needs.frontend-image.outputs.image }}
 
   e2e-development:
     name: End-to-end tests against development
     runs-on: ubuntu-latest
-    needs: deploy-development
-    if: github.ref == 'refs/heads/dev'
+    needs: [ changes, deploy-backend-development, deploy-frontend-development ]
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/dev' && needs.changes.outputs.e2e == 'true' }}
 
     environment:
       name: development
@@ -179,32 +254,20 @@ jobs:
         working-directory: e2e
         run: npx playwright install --with-deps chromium
 
-      - name: Wait for the application to respond
-        env:
-          APP_URL: ${{ vars.APP_URL }}
-        run: |
-          base="${APP_URL%/}"
+      - name: Wait for the backend
+        uses: ./.github/actions/wait-for-url
+        with:
+          url: ${{ vars.BACKEND_URL }}/api/tasks
 
-          for attempt in $(seq 1 30); do
-            code=$(curl --silent --output /dev/null --write-out "%{http_code}" \
-              --max-time 60 "${base}/api/tasks" || true)
-
-            echo "Attempt ${attempt}: HTTP ${code}"
-
-            if [ "$code" = "200" ]; then
-              exit 0
-            fi
-
-            sleep 10
-          done
-
-          echo "The application did not respond in time"
-          exit 1
+      - name: Wait for the frontend
+        uses: ./.github/actions/wait-for-url
+        with:
+          url: ${{ vars.FRONTEND_URL }}
 
       - name: Run end-to-end tests
         working-directory: e2e
         env:
-          BASE_URL: ${{ vars.APP_URL }}
+          BASE_URL: ${{ vars.FRONTEND_URL }}
         run: npx playwright test
 
       - name: Upload Playwright report
@@ -215,113 +278,141 @@ jobs:
           path: e2e/playwright-report/
           if-no-files-found: ignore
 
-  deploy-production:
-    name: Deploy to production
+  mark-verified:
+    name: Mark tested images as verified
     runs-on: ubuntu-latest
-    needs: image
-    if: github.ref == 'refs/heads/main'
+    needs: [ backend-image, frontend-image, e2e-development ]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/dev' && needs.e2e-development.result == 'success' }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Tag the backend image as verified
+        if: needs.backend-image.result == 'success'
+        env:
+          IMAGE: ${{ needs.backend-image.outputs.image }}
+        run: |
+          docker buildx imagetools create --tag "ghcr.io/${GITHUB_REPOSITORY,,}:dev-verified" "$IMAGE"
+          echo "Backend $IMAGE is now dev-verified"
+
+      - name: Tag the frontend image as verified
+        if: needs.frontend-image.result == 'success'
+        env:
+          IMAGE: ${{ needs.frontend-image.outputs.image }}
+        run: |
+          docker buildx imagetools create --tag "ghcr.io/${GITHUB_REPOSITORY,,}-frontend:dev-verified" "$IMAGE"
+          echo "Frontend $IMAGE is now dev-verified"
+
+  deploy-backend-production:
+    name: Deploy backend to production
+    runs-on: ubuntu-latest
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.backend == 'true'
 
     environment:
       name: production
-      url: ${{ vars.APP_URL }}
+      url: ${{ vars.BACKEND_URL }}
 
     steps:
-      - name: Trigger Render deploy
-        id: trigger
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the verified image
+        id: image
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:dev-verified" >> "$GITHUB_OUTPUT"
+
+      - name: Show the image being promoted
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-          IMAGE: ${{ needs.image.outputs.image }}
-        run: |
-          response=$(curl --fail --silent --show-error \
-            --request POST \
-            --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys" \
-            --header "Authorization: Bearer ${RENDER_API_KEY}" \
-            --header "Accept: application/json" \
-            --header "Content-Type: application/json" \
-            --data "{\"imageUrl\":\"${IMAGE}\"}")
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker buildx imagetools inspect "$IMAGE"
 
-          deploy_id=$(echo "$response" | jq -r '.id')
+      - name: Deploy to Render
+        uses: ./.github/actions/render-deploy
+        with:
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          service-id: ${{ secrets.RENDER_BACKEND_SERVICE_ID }}
+          image: ${{ steps.image.outputs.image }}
 
-          if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
-            echo "Render did not return a deploy id"
-            echo "$response"
-            exit 1
-          fi
+  deploy-frontend-production:
+    name: Deploy frontend to production
+    runs-on: ubuntu-latest
+    needs: [ changes, deploy-backend-production ]
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/main' && needs.changes.outputs.frontend == 'true' }}
 
-          echo "Triggered deploy $deploy_id with image $IMAGE"
-          echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+    environment:
+      name: production
+      url: ${{ vars.FRONTEND_URL }}
 
-      - name: Wait for deploy to go live
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the verified image
+        id: image
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}-frontend:dev-verified" >> "$GITHUB_OUTPUT"
+
+      - name: Show the image being promoted
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
-        run: |
-          for attempt in $(seq 1 90); do
-            status=$(curl --fail --silent --show-error \
-              --url "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" \
-              --header "Authorization: Bearer ${RENDER_API_KEY}" \
-              --header "Accept: application/json" | jq -r '.status')
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker buildx imagetools inspect "$IMAGE"
 
-            echo "Attempt ${attempt}: ${status}"
-
-            case "$status" in
-              live)
-                echo "Deploy is live"
-                exit 0
-                ;;
-              build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
-                echo "Deploy ended with status ${status}"
-                exit 1
-                ;;
-            esac
-
-            sleep 10
-          done
-
-          echo "Timed out waiting for the deploy to go live"
-          exit 1
+      - name: Deploy to Render
+        uses: ./.github/actions/render-deploy
+        with:
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          service-id: ${{ secrets.RENDER_FRONTEND_SERVICE_ID }}
+          image: ${{ steps.image.outputs.image }}
 
   smoke-production:
     name: Smoke test production
     runs-on: ubuntu-latest
-    needs: deploy-production
-    if: github.ref == 'refs/heads/main'
+    needs: [ deploy-backend-production, deploy-frontend-production ]
+    if: ${{ !cancelled() && !failure() && (needs.deploy-backend-production.result == 'success' || needs.deploy-frontend-production.result == 'success') }}
 
     environment:
       name: production
 
     steps:
-      - name: Verify that production serves the API and the frontend
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Wait for the backend
+        uses: ./.github/actions/wait-for-url
+        with:
+          url: ${{ vars.BACKEND_URL }}/api/tasks
+
+      - name: Wait for the frontend
+        uses: ./.github/actions/wait-for-url
+        with:
+          url: ${{ vars.FRONTEND_URL }}
+
+      - name: Verify that the frontend and backend are wired together
         env:
-          APP_URL: ${{ vars.APP_URL }}
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
         run: |
-          base="${APP_URL%/}"
+          backend="${BACKEND_URL%/}"
+          frontend="${FRONTEND_URL%/}"
 
-          for attempt in $(seq 1 30); do
-            code=$(curl --silent --output /dev/null --write-out "%{http_code}" \
-              --max-time 60 "${base}/api/tasks" || true)
+          curl --fail --silent --show-error "${frontend}/" | grep -q 'id="task-list"'
+          echo "The frontend serves the page"
 
-            echo "Attempt ${attempt}: HTTP ${code}"
+          curl --fail --silent --show-error "${frontend}/config.js" | grep -q "${backend}"
+          echo "The frontend points at ${backend}"
 
-            if [ "$code" = "200" ]; then
-              break
-            fi
-
-            if [ "$attempt" = "30" ]; then
-              echo "The API did not respond in time"
-              exit 1
-            fi
-
-            sleep 10
-          done
-
-          page=$(curl --fail --silent --show-error --max-time 60 "${base}/")
-
-          if ! echo "$page" | grep -q "task-list"; then
-            echo "The frontend was not served as expected"
-            exit 1
-          fi
-
-          echo "Production is serving both the API and the frontend"
+          curl --fail --silent --show-error --dump-header - --output /dev/null \
+            --header "Origin: ${frontend}" "${backend}/api/tasks" \
+            | grep -qi "^access-control-allow-origin: ${frontend}"
+          echo "The backend accepts requests from ${frontend}"
